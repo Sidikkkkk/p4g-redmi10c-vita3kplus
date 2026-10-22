@@ -1,0 +1,101 @@
+name: Rebuild P4G Vita3K-Plus (Redmi 10C Edition)
+
+on:
+  workflow_dispatch:
+    inputs:
+      title_id:
+        description: 'Title ID P4G'
+        required: true
+        default: 'PCSE00120'
+      build_mode:
+        description: 'Mode Build'
+        required: true
+        default: 'fast_v133_redmi10c'
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Scripts
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install APKTool, NDK llvm-strip, Zipalign & Apksigner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl jq python3-pip zipalign apksigner ninja-build
+          pip3 install --break-system-packages pillow || pip3 install pillow
+          sudo wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          sudo wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
+          sudo chmod +x /usr/local/bin/apktool /usr/local/bin/apktool.jar
+
+      # JALUR A: FULL SOURCE REBUILD DARI nckstwrt/Vita3K-Plus.git (Jika dipilih full_source_sd680)
+      - name: Compile C++ Source from nckstwrt/Vita3K-Plus (Snapdragon 680 Tuned)
+        if: ${{ github.event.inputs.build_mode == 'full_source_sd680' }}
+        run: |
+          git clone --recursive https://github.com/nckstwrt/Vita3K-Plus.git vpk_src
+          python3 patch_source_sd680.py "${{ github.event.inputs.title_id }}"
+          cd vpk_src
+          if [ -f "vcpkg.json" ] && [ -n "$VCPKG_ROOT" ]; then
+            $VCPKG_ROOT/vcpkg install --triplet arm64-android
+          fi
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease || ./gradlew assembleReldebug
+          FOUND_APK=$(find . -name "*.apk" | head -n 1)
+          cp "$FOUND_APK" ../../base.apk
+
+      # JALUR B: FAST REBUILD DARI RILIS TERBARU nckstwrt/Vita3K-Plus (v1.3.3+)
+      - name: Download Latest Release from nckstwrt/Vita3K-Plus
+        if: ${{ github.event.inputs.build_mode != 'full_source_sd680' }}
+        run: |
+          echo "Mengambil APK rilis terbaru langsung dari https://github.com/nckstwrt/Vita3K-Plus/releases ..."
+          DL_URL=$(curl -s https://api.github.com/repos/nckstwrt/Vita3K-Plus/releases | jq -r '.[0].assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n 1)
+          echo "Downloading: $DL_URL"
+          wget -q "$DL_URL" -O base.apk
+
+      - name: Decompile, Strip ELF Symbols (NDK llvm-strip) & Patch for Redmi 10C
+        run: |
+          apktool d base.apk -o decompiled -f
+
+          # Hapus arsitektur selain arm64-v8a jika ada agar ukuran APK ramping
+          find decompiled/lib -mindepth 1 -maxdepth 1 -type d ! -name "arm64-v8a" -exec rm -rf {} + || true
+
+          # Strip simbol debug dari semua binary .so menggunakan Android NDK llvm-strip
+          LLVM_STRIP=$(find /usr/local/lib/android/sdk/ndk -name "llvm-strip" | sort -V | tail -n 1)
+          if [ -n "$LLVM_STRIP" ]; then
+            echo "Menjalankan NDK llvm-strip pada libvita3k.so untuk memangkas overhead RAM..."
+            "$LLVM_STRIP" --strip-unneeded decompiled/lib/arm64-v8a/*.so || true
+          fi
+
+          python3 patch_apk_redmi10c.py "${{ github.event.inputs.title_id }}"
+          apktool b decompiled --use-aapt2 -o unsigned.apk
+
+      - name: 4KB Page-Align & Sign APK (V1+V2+V3)
+        run: |
+          keytool -genkey -v -keystore p4g-fog.keystore \
+            -storepass p4gandroid -alias p4gfog -keypass p4gandroid \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Atlus, OU=Redmi10C, O=Atlus, L=Tokyo, S=Tokyo, C=JP"
+
+          # Alignment 4KB wajib untuk extractNativeLibs="false" (Zero-Copy Direct mmap)
+          zipalign -v -p 4 unsigned.apk aligned.apk
+
+          apksigner sign --ks p4g-fog.keystore \
+            --ks-pass pass:p4gandroid \
+            --key-pass pass:p4gandroid \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out Persona-4-Golden-Redmi10C.apk aligned.apk
+
+      - name: Upload Redmi 10C Optimized APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Persona-4-Golden-Redmi10C
+          path: Persona-4-Golden-Redmi10C.apk
