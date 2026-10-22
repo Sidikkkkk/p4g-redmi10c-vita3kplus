@@ -28,34 +28,21 @@ jobs:
       - name: Install APKTool, NDK llvm-strip, Zipalign & Apksigner
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget curl jq python3-pip zipalign apksigner ninja-build
-          pip3 install --break-system-packages pillow || pip3 install pillow
-          sudo wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
-          sudo wget -q https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -O /usr/local/bin/apktool.jar
-          sudo chmod +x /usr/local/bin/apktool /usr/local/bin/apktool.jar
+          sudo apt-get install -y wget curl jq python3-pip python3-pil zipalign apksigner ninja-build
+          
+          # Unduh Apktool secara stabil langsung dari GitHub Releases iBotPeaches
+          APKTOOL_VER="2.11.0"
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar -O /usr/local/bin/apktool.jar
+          wget -q https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool -O /usr/local/bin/apktool
+          chmod +x /usr/local/bin/apktool /usr/local/bin/apktool.jar
 
-      # JALUR A: FULL SOURCE REBUILD DARI nckstwrt/Vita3K-Plus.git (Jika dipilih full_source_sd680)
-      - name: Compile C++ Source from nckstwrt/Vita3K-Plus (Snapdragon 680 Tuned)
-        if: ${{ github.event.inputs.build_mode == 'full_source_sd680' }}
-        run: |
-          git clone --recursive https://github.com/nckstwrt/Vita3K-Plus.git vpk_src
-          python3 patch_source_sd680.py "${{ github.event.inputs.title_id }}"
-          cd vpk_src
-          if [ -f "vcpkg.json" ] && [ -n "$VCPKG_ROOT" ]; then
-            $VCPKG_ROOT/vcpkg install --triplet arm64-android
-          fi
-          cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease || ./gradlew assembleReldebug
-          FOUND_APK=$(find . -name "*.apk" | head -n 1)
-          cp "$FOUND_APK" ../../base.apk
-
-      # JALUR B: FAST REBUILD DARI RILIS TERBARU nckstwrt/Vita3K-Plus (v1.3.3+)
       - name: Download Latest Release from nckstwrt/Vita3K-Plus
-        if: ${{ github.event.inputs.build_mode != 'full_source_sd680' }}
         run: |
-          echo "Mengambil APK rilis terbaru langsung dari https://github.com/nckstwrt/Vita3K-Plus/releases ..."
+          echo "Mengambil APK rilis terbaru dari nckstwrt/Vita3K-Plus..."
           DL_URL=$(curl -s https://api.github.com/repos/nckstwrt/Vita3K-Plus/releases | jq -r '.[0].assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n 1)
+          if [ -z "$DL_URL" ] || [ "$DL_URL" = "null" ]; then
+            DL_URL=$(curl -s https://api.github.com/repos/Vita3K/Vita3K-Android/releases | jq -r '.[0].assets[] | select(.name | endswith(".apk")) | .browser_download_url' | head -n 1)
+          fi
           echo "Downloading: $DL_URL"
           wget -q "$DL_URL" -O base.apk
 
@@ -63,13 +50,13 @@ jobs:
         run: |
           apktool d base.apk -o decompiled -f
 
-          # Hapus arsitektur selain arm64-v8a jika ada agar ukuran APK ramping
+          # Hapus arsitektur selain arm64-v8a agar ukuran APK ramping
           find decompiled/lib -mindepth 1 -maxdepth 1 -type d ! -name "arm64-v8a" -exec rm -rf {} + || true
 
-          # Strip simbol debug dari semua binary .so menggunakan Android NDK llvm-strip
+          # Strip simbol debug dari binary .so menggunakan NDK llvm-strip
           LLVM_STRIP=$(find /usr/local/lib/android/sdk/ndk -name "llvm-strip" | sort -V | tail -n 1)
           if [ -n "$LLVM_STRIP" ]; then
-            echo "Menjalankan NDK llvm-strip pada libvita3k.so untuk memangkas overhead RAM..."
+            echo "Menjalankan NDK llvm-strip pada libvita3k.so..."
             "$LLVM_STRIP" --strip-unneeded decompiled/lib/arm64-v8a/*.so || true
           fi
 
@@ -83,7 +70,6 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Atlus, OU=Redmi10C, O=Atlus, L=Tokyo, S=Tokyo, C=JP"
 
-          # Alignment 4KB wajib untuk extractNativeLibs="false" (Zero-Copy Direct mmap)
           zipalign -v -p 4 unsigned.apk aligned.apk
 
           apksigner sign --ks p4g-fog.keystore \
